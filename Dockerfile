@@ -1,41 +1,31 @@
-# syntax=docker/dockerfile:1
+# build binary file
+FROM golang:1.21-alpine AS builder
 
-FROM golang:alpine as app-builder
+RUN apk --update upgrade && apk add --no-cache git make build-base && rm -rf /var/cache/apk/*
 
-# Set destination for COPY
+RUN mkdir /app 
 WORKDIR /app
+COPY go.mod .
+COPY go.sum .
 
-# Download Go modules
-COPY go.mod go.sum ./
-RUN go mod download
+RUN go mod download 
 
-# Copy the source code. Note the slash at the end, as explained in
-# https://docs.docker.com/engine/reference/builder/#copy
-COPY *.go ./
-COPY handlers/ ./handlers/
-COPY handlers/data/ ./handlers/data/
-# NO-OP in case handlers/data/ was already copied previously
-RUN true
-COPY utils/ ./utils/
-COPY views/ ./views/
+COPY . .
 
-# Build
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags '-extldflags "-static"'
+ARG buildOptions
 
-# Run in scratch container
-FROM scratch
-# the test program:
-COPY --from=app-builder /app/instafix /instafix
-# the tls certificates:
-# NB: this pulls directly from the upstream image, which already has ca-certificates:
-COPY --from=alpine:latest /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+RUN env ${buildOptions} go build -ldflags="-w -s" -o /go/bin/instafix .
 
-# Optional:
-# To bind to a TCP port, runtime parameters must be supplied to the docker command.
-# But we can document in the Dockerfile what ports
-# the application is going to listen on by default.
-# https://docs.docker.com/engine/reference/builder/#expose
+# optimized build
+
+FROM alpine 
+RUN apk add --no-cache tzdata
+RUN apk add --no-cache curl 
+ENV TZ=Europe/Stockholm
+COPY --from=builder /go/bin/instafix /go/bin/instafix
+
+RUN apk --update upgrade && apk add --no-cache ca-certificates && update-ca-certificates 2>/dev/null && true && rm -rf /var/cache/apk/*
+
 EXPOSE 3000
 
-# Run the app
-ENTRYPOINT ["/instafix"]
+ENTRYPOINT ["/go/bin/instafix"]

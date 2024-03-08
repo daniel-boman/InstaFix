@@ -20,6 +20,10 @@
 # Go workspace file
 go.work
 
+# Jetbrains
+.idea/
+
+
 # InstaFix spesific
 static/
 database/
