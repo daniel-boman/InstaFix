@@ -1,5 +1,5 @@
 # build binary file
-FROM golang:1.21-alpine AS builder
+FROM golang:1.22-alpine AS builder
 
 RUN apk --update upgrade && apk add --no-cache git make build-base && rm -rf /var/cache/apk/*
 
