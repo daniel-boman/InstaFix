@@ -1,8 +1,7 @@
 package handlers
 
 import (
-	data "instafix/handlers/data"
-	"instafix/utils"
+	scraper "instafix/handlers/scraper"
 	"strings"
 
 	"github.com/gofiber/fiber/v2"
@@ -13,21 +12,19 @@ func Videos() fiber.Handler {
 		postID := c.Params("postID")
 		mediaNum, err := c.ParamsInt("mediaNum", 1)
 		if err != nil {
-			return c.SendStatus(fiber.StatusInternalServerError)
+			return err
 		}
 
-		// Get data
-		item := &data.InstaData{}
-		err = item.GetData(postID)
+		item, err := scraper.GetData(postID)
 		if err != nil {
-			return c.SendStatus(fiber.StatusInternalServerError)
+			return err
 		}
 
 		// Redirect to image URL
 		if mediaNum > len(item.Medias) {
-			return c.SendStatus(fiber.StatusNotFound)
+			return err
 		}
-		videoURL := utils.B2S(item.Medias[max(1, mediaNum)-1].URL)
+		videoURL := item.Medias[max(1, mediaNum)-1].URL
 
 		// Redirect to proxy if not TelegramBot in User-Agent
 		if strings.Contains(c.Get("User-Agent"), "TelegramBot") {

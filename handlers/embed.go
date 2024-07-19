@@ -1,14 +1,13 @@
 package handlers
 
 import (
-	"bytes"
+	scraper "instafix/handlers/scraper"
 	"instafix/utils"
 	"instafix/views"
+	"instafix/views/model"
 	"net/url"
 	"strconv"
 	"strings"
-
-	data "instafix/handlers/data"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/rs/zerolog/log"
@@ -31,7 +30,7 @@ func mediaidToCode(mediaID int) string {
 func Embed() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		c.Set("Content-Type", "text/html; charset=utf-8")
-		viewsData := &views.ViewsData{}
+		viewsData := &model.ViewsData{}
 		viewsBuf := bytebufferpool.Get()
 		defer bytebufferpool.Put(viewsBuf)
 
@@ -85,9 +84,7 @@ func Embed() fiber.Handler {
 			return c.Redirect(viewsData.URL)
 		}
 
-		// Get data
-		item := data.InstaData{}
-		err = item.GetData(postID)
+		item, err := scraper.GetData(postID)
 		if err != nil || len(item.Medias) == 0 {
 			viewsData.Description = "Post might not be available"
 			views.Embed(viewsData, viewsBuf)
@@ -108,17 +105,17 @@ func Embed() fiber.Handler {
 		var sb strings.Builder
 		sb.Grow(32) // 32 bytes should be enough for most cases
 
-		viewsData.Title = "@" + utils.B2S(item.Username)
+		viewsData.Title = "@" + item.Username
 		// Gallery do not have any caption
 		if !isGallery {
-			viewsData.Description = utils.B2S(item.Caption)
+			viewsData.Description = item.Caption
 			if len(viewsData.Description) > 255 {
-				viewsData.Description = viewsData.Description[:250] + "..."
+				viewsData.Description = utils.Substr(viewsData.Description, 0, 250) + "..."
 			}
 		}
 
 		typename := item.Medias[max(1, mediaNum)-1].TypeName
-		isImage := bytes.Contains(typename, []byte("Image")) || bytes.Contains(typename, []byte("StoryVideo"))
+		isImage := strings.Contains(typename, "Image") || strings.Contains(typename, "StoryVideo")
 		switch {
 		case mediaNum == 0 && isImage && len(item.Medias) > 1:
 			viewsData.Card = "summary_large_image"
@@ -139,7 +136,7 @@ func Embed() fiber.Handler {
 			sb.WriteString("/")
 			sb.WriteString(strconv.Itoa(max(1, mediaNum)))
 			viewsData.VideoURL = sb.String()
-			viewsData.OEmbedURL = c.BaseURL() + "/oembed?text=" + url.QueryEscape(viewsData.Description) + "&url=" + url.QueryEscape(viewsData.URL)
+			viewsData.OEmbedURL = c.BaseURL() + "/oembed?text=" + url.QueryEscape(viewsData.Description) + "&url=" + viewsData.URL
 		}
 
 		if direct {

@@ -1,8 +1,7 @@
 package handlers
 
 import (
-	data "instafix/handlers/data"
-	"instafix/utils"
+	scraper "instafix/handlers/scraper"
 
 	"github.com/gofiber/fiber/v2"
 )
@@ -12,21 +11,19 @@ func Images() fiber.Handler {
 		postID := c.Params("postID")
 		mediaNum, err := c.ParamsInt("mediaNum", 1)
 		if err != nil {
-			return c.SendStatus(fiber.StatusNotFound)
+			return err
 		}
 
-		// Get data
-		item := &data.InstaData{}
-		err = item.GetData(postID)
+		item, err := scraper.GetData(postID)
 		if err != nil {
-			return c.SendStatus(fiber.StatusNotFound)
+			return err
 		}
 
 		// Redirect to image URL
 		if mediaNum > len(item.Medias) {
-			return c.SendStatus(fiber.StatusNotFound)
+			return err
 		}
 		imageURL := item.Medias[max(1, mediaNum)-1].URL
-		return c.Redirect(utils.B2S(imageURL), fiber.StatusFound)
+		return c.Redirect(imageURL, fiber.StatusFound)
 	}
 }
