@@ -4,6 +4,8 @@ import (
 	"image"
 	"image/jpeg"
 	scraper "instafix/handlers/scraper"
+	"io"
+	"log/slog"
 	"math"
 	"net"
 	"net/http"
@@ -14,21 +16,25 @@ import (
 	"time"
 
 	"github.com/RyanCarrier/dijkstra/v2"
-	"github.com/bamiaux/rez"
-	"github.com/gofiber/fiber/v2"
-	"github.com/rs/zerolog/log"
+	"github.com/go-chi/chi/v5"
+	"golang.org/x/image/draw"
+	"golang.org/x/sync/singleflight"
 )
 
-var transport = &http.Transport{
-	DialContext: (&net.Dialer{
-		Timeout: 5 * time.Second,
-	}).DialContext,
-	TLSHandshakeTimeout:   5 * time.Second,
-	ResponseHeaderTimeout: 5 * time.Second,
-	ExpectContinueTimeout: 1 * time.Second,
-	DisableKeepAlives:     true,
-}
 var timeout = 60 * time.Second
+var transport = &http.Transport{
+	Proxy: nil, // Skip any proxy
+	DialContext: (&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext,
+	ForceAttemptHTTP2:     true,
+	MaxIdleConns:          100,
+	IdleConnTimeout:       90 * time.Second,
+	TLSHandshakeTimeout:   10 * time.Second,
+	ExpectContinueTimeout: 1 * time.Second,
+}
+var sflightGrid singleflight.Group
 
 // getHeight returns the height of the rows, imagesWH [w,h]
 func getHeight(imagesWH [][]float64, canvasWidth int) float64 {
@@ -107,7 +113,7 @@ func GenerateGrid(images []image.Image) (image.Image, error) {
 		canvasHeight += rowHeight
 	}
 
-	canvas := image.NewYCbCr(image.Rect(0, 0, canvasWidth, canvasHeight), image.YCbCrSubsampleRatio420)
+	canvas := image.NewRGBA(image.Rect(0, 0, canvasWidth, canvasHeight))
 
 	oldRowHeight := 0
 	for i := 1; i < len(path); i++ {
@@ -116,9 +122,7 @@ func GenerateGrid(images []image.Image) (image.Image, error) {
 		heightRow := heightRows[i-1]
 		for _, imageOne := range inRow {
 			newWidth := float64(heightRow) * float64(imageOne.Bounds().Dx()) / float64(imageOne.Bounds().Dy())
-			if err := rez.Convert(canvas.SubImage(image.Rect(oldImWidth, oldRowHeight, oldImWidth+int(newWidth), oldRowHeight+int(heightRow))), imageOne, rez.NewBilinearFilter()); err != nil {
-				return nil, err
-			}
+			draw.ApproxBiLinear.Scale(canvas, image.Rect(oldImWidth, oldRowHeight, oldImWidth+int(newWidth), oldRowHeight+int(heightRow)), imageOne, imageOne.Bounds(), draw.Src, nil)
 			oldImWidth += int(newWidth)
 		}
 		oldRowHeight += heightRow
@@ -126,42 +130,50 @@ func GenerateGrid(images []image.Image) (image.Image, error) {
 	return canvas, nil
 }
 
-func Grid() fiber.Handler {
-	return func(c *fiber.Ctx) error {
-		postID := c.Params("postID")
-		gridFname := filepath.Join("static", postID+".jpeg")
+func Grid(w http.ResponseWriter, r *http.Request) {
+	postID := chi.URLParam(r, "postID")
+	gridFname := filepath.Join("static", postID+".jpeg")
 
-		// If already exists, return
-		if _, ok := scraper.LRU.Get(gridFname); ok {
-			return c.SendFile(gridFname)
-		}
-
-		item, err := scraper.GetData(postID)
+	// If already exists, return
+	if _, ok := scraper.LRU.Get(gridFname); ok {
+		f, err := os.Open(gridFname)
 		if err != nil {
-			return err
+			return
 		}
+		defer f.Close()
+		w.Header().Set("Content-Type", "image/jpeg")
+		io.Copy(w, f)
+		return
+	}
 
-		// Filter media only include image
-		var mediaURLs []string
-		for _, media := range item.Medias {
-			if !strings.Contains(media.TypeName, "Image") {
-				continue
-			}
-			mediaURLs = append(mediaURLs, media.URL)
+	item, err := scraper.GetData(postID)
+	if err != nil {
+		return
+	}
+
+	// Filter media only include image
+	var mediaURLs []string
+	for _, media := range item.Medias {
+		if !strings.Contains(media.TypeName, "Image") {
+			continue
 		}
+		mediaURLs = append(mediaURLs, media.URL)
+	}
 
-		if len(item.Medias) == 1 || len(mediaURLs) == 1 {
-			return c.Redirect("/images/" + postID + "/1")
-		}
+	if len(item.Medias) == 1 || len(mediaURLs) == 1 {
+		http.Redirect(w, r, "/images/"+postID+"/1", http.StatusFound)
+		return
+	}
 
+	_, err, _ = sflightGrid.Do(postID, func() (interface{}, error) {
 		var wg sync.WaitGroup
 		images := make([]image.Image, len(mediaURLs))
-		client := http.Client{Transport: transport, Timeout: timeout}
 		for i, mediaURL := range mediaURLs {
 			wg.Add(1)
 
 			go func(i int, url string) {
 				defer wg.Done()
+				client := http.Client{Transport: transport, Timeout: timeout}
 				req, err := http.NewRequest(http.MethodGet, url, http.NoBody)
 				if err != nil {
 					return
@@ -170,14 +182,14 @@ func Grid() fiber.Handler {
 				// Make request client.Get
 				res, err := client.Do(req)
 				if err != nil {
-					log.Error().Str("postID", postID).Err(err).Msg("Failed to get image")
+					slog.Error("Failed to get image", "postID", postID, "err", err)
 					return
 				}
 				defer res.Body.Close()
 
 				images[i], err = jpeg.Decode(res.Body)
 				if err != nil {
-					log.Error().Str("postID", postID).Err(err).Msg("Failed to decode image")
+					slog.Error("Failed to decode image", "postID", postID, "err", err)
 					return
 				}
 			}(i, mediaURL)
@@ -187,20 +199,33 @@ func Grid() fiber.Handler {
 		// Create grid Images
 		grid, err := GenerateGrid(images)
 		if err != nil {
-			return err
+			return false, err
 		}
 
 		// Write grid to static folder
 		f, err := os.Create(gridFname)
 		if err != nil {
-			return err
+			return false, err
 		}
 		defer f.Close()
 
 		if err := jpeg.Encode(f, grid, &jpeg.Options{Quality: 80}); err != nil {
-			return err
+			return false, err
 		}
 		scraper.LRU.Add(gridFname, true)
-		return c.SendFile(gridFname)
+		return true, nil
+	})
+
+	if err != nil {
+		return
 	}
+
+	f, err := os.Open(gridFname)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", "image/jpeg")
+	io.Copy(w, f)
+	return
 }
